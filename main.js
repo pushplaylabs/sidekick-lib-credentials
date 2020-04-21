@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import sjcl from 'sjcl'
+import sjcl from './sjcl.min.js'
 
 const textEncode = string => new TextEncoder().encode(string)
 const bytesToBase64 = bytes => sjcl.codec.base64.fromBits(sjcl.codec.bytes.toBits(bytes))
