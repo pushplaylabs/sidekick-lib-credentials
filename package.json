@@ -1,0 +1,18 @@
+{
+  "name": "sidekick-lib-credentials",
+  "version": "1.0.0",
+  "description": "Secure password library",
+  "main": "src/index.js",
+  "author": "PushPlayLabs Inc.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "format": "prettier --write \"*.js\""
+  },
+  "devDependencies": {
+    "prettier": "^2.0.4"
+  },
+  "dependencies": {
+    "nanoid": "^3.1.3",
+    "sjcl": "^1.0.8"
+  }
+}
