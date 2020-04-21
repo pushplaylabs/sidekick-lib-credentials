@@ -2,7 +2,7 @@
   "name": "sidekick-lib-credentials",
   "version": "1.0.0",
   "description": "Secure password library",
-  "main": "src/index.js",
+  "main": "main.js",
   "author": "PushPlayLabs Inc.",
   "license": "UNLICENSED",
   "scripts": {
