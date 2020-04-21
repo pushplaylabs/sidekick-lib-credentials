@@ -20,7 +20,7 @@ export const CredentialOwners = Object.freeze({
   TEAM: 'Team',
 })
 
-export function init({ crypto = window.crypto, storage = window.localStorage }) {
+export function init({ crypto = window.crypto, storage = window.localStorage } = {}) {
   const pbkdf2 = async (password, saltStr) => {
     const importAlg = { name: 'PBKDF2' }
     const passwordRaw = new Uint8Array(bitsToBytes(utfToBits(password)))
