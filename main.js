@@ -1,399 +1,63 @@
 import { nanoid } from 'nanoid'
 import sjcl from 'sjcl'
 
-class Key {
-  constructor({ key, kid, jwk }) {
-    if (key) {
-      this.crypto = key
-      this.id = kid
+const textEncode = string => new TextEncoder().encode(string)
+const bytesToBase64 = bytes => sjcl.codec.base64.fromBits(sjcl.codec.bytes.toBits(bytes))
+const base64ToBytes = base64 => sjcl.codec.bytes.fromBits(sjcl.codec.base64.toBits(base64))
+const utfToBits = utf8String => sjcl.codec.utf8String.toBits(utf8String)
+const bytesToUtf = bytes => sjcl.codec.utf8String.fromBits(sjcl.codec.bytes.toBits(bytes))
+const bitsToHex = bits => sjcl.codec.hex.fromBits(bits)
+const bitsToBytes = bits => sjcl.codec.bytes.fromBits(bits)
+const hkdf = (string, string2, version = 'PBES2g-HS256') =>
+  sjcl.misc.hkdf(string, 256, string2, version, sjcl.hash.sha256)
 
-      return KeyExport(key, kid).then(result => {
-        this.jwk = result
+async function pbkdf2(password, saltStr) {
+  const importAlg = { name: 'PBKDF2' }
+  const passwordRaw = new Uint8Array(bitsToBytes(utfToBits(password)))
+  const key = await window.crypto.subtle.importKey('raw', passwordRaw, importAlg, false, [
+    'deriveKey',
+  ])
 
-        return this
-      })
-    } else {
-      this.jwk = jwk
-      this.id = jwk.kid
-      return JwkImport(jwk).then(result => {
-        this.crypto = result
+  const salt = new Uint8Array(bitsToBytes(utfToBits(saltStr)))
+  const deriveAlg = { name: 'PBKDF2', iterations: 100000, hash: { name: 'SHA-256' }, salt }
+  const aesOptions = { name: 'AES-GCM', length: 256 }
+  const derivedKey = await window.crypto.subtle.deriveKey(deriveAlg, key, aesOptions, true, [
+    'encrypt',
+  ])
 
-        return this
-      })
-    }
-  }
-}
-
-// publicKey: jwk format
-// data: raw data to encrypt
-// returns
-// { key, encrypted }
-class Credential {
-  constructor({ publicKey, data }) {
-    this.data = data
-    return new Key({ jwk: publicKey })
-      .then(publicKey => new CredentialKey({ publicKey }))
-      .then(key => (this.key = key))
-      .then(this.encrypt)
-      .then(() => this)
-  }
-
-  encrypt = () => {
-    const iv = window.crypto.getRandomValues(new Uint8Array(12))
-
-    return Encrypt(iv, this.key.crypto(), textEncode(JSON.stringify(this.data)))
-      .then(result => bytesToBase64(new Uint8Array(result)))
-      .then(
-        data =>
-          (this.encrypted = {
-            kid: this.key.id(),
-            enc: 'A256GCM',
-            cty: 'b5+jwk+json',
-            iv: bytesToBase64(iv),
-            data,
-          }),
-      )
-  }
-}
-
-class CredentialKey {
-  constructor({ publicKey }) {
-    return KeyGenerate()
-      .then(key => new Key({ key, kid: nanoid() }))
-      .then(key => (this.key = key))
-      .then(() => this.encrypt(publicKey))
-      .then(() => this)
-  }
-
-  encrypt(publicKey) {
-    const encodedKey = textEncode(JSON.stringify(this.key.jwk))
-
-    return RsaEncrypt(publicKey.crypto, encodedKey)
-      .then(result => bytesToBase64(new Uint8Array(result)))
-      .then(data => {
-        this.encrypted = {
-          kid: publicKey.id,
-          enc: 'RSA-OAEP',
-          cty: 'b5+jwk+json',
-          data,
-        }
-      })
-  }
-
-  crypto() {
-    return this.key.crypto
-  }
-
-  id() {
-    return this.key.id
-  }
-}
-
-class EncryptedCredential {
-  constructor({ encryptedData, encryptedKeyData, privateKey, id }) {
-    this.encryptedData = encryptedData
-    this.id = id
-    return new EncryptedCredentialKey({ encryptedData: encryptedKeyData, privateKey })
-      .then(key => (this.key = key))
-      .then(this.encrypt)
-      .then(data => (this.data = data))
-      .then(() => this)
-  }
-
-  encrypt = () => {
-    return Decrypt(this.encryptedData.iv, this.key.crypto(), this.encryptedData.data)
-  }
-}
-
-class EncryptedCredentialKey {
-  constructor({ encryptedData, privateKey }) {
-    this.encryptedData = encryptedData
-    return this.decrypt(privateKey)
-      .then(jwk => new Key({ jwk: JSON.parse(jwk) }))
-      .then(key => (this.key = key))
-      .then(() => this)
-  }
-
-  decrypt(privateKey) {
-    return RsaDecrypt(privateKey.crypto, this.encryptedData.data)
-  }
-
-  crypto() {
-    return this.key.crypto
-  }
-}
-
-const RecoveryKey = user => {
-  var get = () => {
-    return window.localStorage.getItem(`USER_${user.id}`)
-  }
-
-  var reset = () => {
-    return window.localStorage.removeItem(`USER_${user.id}`)
-  }
-
-  var set = value => {
-    return window.localStorage.setItem(`USER_${user.id}`, value)
-  }
-
-  var id = () => {
-    return get().split('-')[0]
-  }
-
-  var value = () => {
-    return get().split('-').slice(1).join('')
-  }
-
-  return { get, set, id, value, reset }
-}
-
-const EncryptedKeySet = (user, rawPublicKey, publicKeyId, encryptedPrivateKey, salt) => {
-  var salt = salt
-  var publicKeyId = publicKeyId
-  var encPrivateKey = encryptedPrivateKey
-  var recoveryKeyString = RecoveryKey(user).get()
-  var _recoveryKey = recoveryKeyString.split('-').slice(1).join('')
-  var _recoveryKeyId = recoveryKeyString.split('-')[0]
-
-  var _publicKey, _privateKey, _mainKey
-
-  var mainKeyGenerator = MainKeyGenerator({
-    recoveryKey: _recoveryKey,
-    recoveryKeyId: _recoveryKeyId,
-    user,
-    salt,
-  })
-
-  var generateMainKey = () => {
-    return mainKeyGenerator.generate().then(key => new Key({ key, kid: 'main' }))
-  }
-
-  var initPublicKey = () => {
-    return new Key({ jwk: rawPublicKey })
-  }
-
-  var decryptPrivateKey = () => {
-    return Decrypt(encryptedPrivateKey.iv, _mainKey.crypto, encryptedPrivateKey.data).then(
-      result => new Key({ jwk: JSON.parse(result) }),
-    )
-  }
-
-  var decryptAll = () => {
-    return generateMainKey()
-      .then(key => (_mainKey = key))
-      .then(decryptPrivateKey)
-      .then(key => (_privateKey = key))
-      .then(initPublicKey)
-      .then(key => (_publicKey = key))
-  }
-
-  var privateKey = () => {
-    return _privateKey
-  }
-
-  var mainKey = () => {
-    return _mainKey
-  }
-
-  var publicKey = () => {
-    return _publicKey
-  }
-
-  return { decryptAll, privateKey, mainKey, salt, publicKey, encPrivateKey, publicKeyId }
-}
-
-const KeySet = user => {
-  var recoveryKeyString = RecoveryKey(user).get()
-  var _recoveryKey = recoveryKeyString.split('-').slice(1).join('')
-  var _recoveryKeyId = recoveryKeyString.split('-')[0]
-  var mainKeyGenerator = MainKeyGenerator({
-    recoveryKey: _recoveryKey,
-    recoveryKeyId: _recoveryKeyId,
-    user: user,
-  })
-  var salt = mainKeyGenerator.salt
-  var _userKeyPromise
-  var _privateKeyId = nanoid()
-  var _publicKeyId = nanoid()
-
-  var _privateKey, _publicKey, _encPrivateKey, _mainKey
-
-  var recoveryKeyId = () => {
-    return _recoveryKeyId
-  }
-
-  var recoveryKey = () => {
-    return _recoveryKey
-  }
-
-  var generateUserKeys = () => {
-    return UserKeyGenerator()
-      .generate()
-      .then(key =>
-        Promise.all([
-          new Promise((res, rej) => res(new Key({ key: key.privateKey, kid: _privateKey }))),
-          new Promise((res, rej) => res(new Key({ key: key.publicKey, kid: _publicKeyId }))),
-        ]),
-      )
-  }
-
-  var generateMainKey = () => {
-    return mainKeyGenerator.generate().then(key => new Key({ key, kid: 'main' }))
-  }
-
-  var exportKeyPromise = (key, kid) => {
-    return new Promise((resolve, reject) => resolve(KeyExport(key.privateKey, kid)))
-  }
-
-  var generateAll = () => {
-    return generateUserKeys()
-      .then(keys => ([_privateKey, _publicKey] = keys))
-      .then(generateMainKey)
-      .then(key => (_mainKey = key))
-      .then(encryptPrivateKey)
-      .then(value => (_encPrivateKey = value))
-      .then(() => this)
-  }
-
-  var privateKey = () => {
-    return _privateKey
-  }
-
-  var publicKey = () => {
-    return _publicKey
-  }
-
-  var mainKey = () => {
-    return _mainKey
-  }
-
-  var encPrivateKey = () => {
-    return _encPrivateKey
-  }
-
-  var encryptPrivateKey = () => {
-    const iv = window.crypto.getRandomValues(new Uint8Array(12))
-    const encodedPrivateKey = textEncode(JSON.stringify(privateKey().jwk))
-
-    return Encrypt(iv, mainKey().crypto, encodedPrivateKey)
-      .then(result => bytesToBase64(new Uint8Array(result)))
-      .then(data => ({
-        kid: 'main',
-        enc: 'A256GCM',
-        cty: 'b5+jwk+json',
-        iv: bytesToBase64(iv),
-        data,
-      }))
-  }
-
-  return {
-    recoveryKey,
-    recoveryKeyId,
-    privateKey,
-    publicKey,
-    salt,
-    mainKey,
-    generateAll,
-    encPrivateKey,
-  }
-}
-
-const textEncode = string => {
-  return new TextEncoder().encode(string)
-}
-
-const bytesToBase64 = bytes => {
-  return sjcl.codec.base64.fromBits(sjcl.codec.bytes.toBits(bytes))
-}
-
-const base64ToBytes = base64 => {
-  return sjcl.codec.bytes.fromBits(sjcl.codec.base64.toBits(base64))
-}
-
-const utfToBits = utf8String => {
-  return sjcl.codec.utf8String.toBits(utf8String)
-}
-
-const bytesToUtf = bytes => {
-  return sjcl.codec.utf8String.fromBits(sjcl.codec.bytes.toBits(bytes))
-}
-
-const bitsToHex = bits => {
-  return sjcl.codec.hex.fromBits(bits)
-}
-
-const bitsToBytes = bits => {
-  return sjcl.codec.bytes.fromBits(bits)
-}
-
-const hkdf = (string, string2, version = 'PBES2g-HS256') => {
-  return sjcl.misc.hkdf(string, 256, string2, version, sjcl.hash.sha256)
-}
-
-const pbkdf2 = (password, salt) => {
-  const importAlg = {
-    name: 'PBKDF2',
-  }
-
-  const deriveAlg = {
-    name: 'PBKDF2',
-    salt: new Uint8Array(bitsToBytes(utfToBits(salt))),
-    iterations: 100000,
-    hash: { name: 'SHA-256' },
-  }
-
-  const aesOptions = {
-    name: 'AES-GCM',
-    length: 256,
-  }
-
-  return window.crypto.subtle
-    .importKey('raw', new Uint8Array(bitsToBytes(utfToBits(password))), importAlg, false, [
-      'deriveKey',
-    ])
-    .then(importedKey => {
-      return window.crypto.subtle.deriveKey(deriveAlg, importedKey, aesOptions, true, ['encrypt'])
-    })
-    .then(derivedKey => {
-      return window.crypto.subtle.exportKey('raw', derivedKey)
-    })
-    .then(res => new Uint8Array(res))
+  const result = await window.crypto.subtle.exportKey('raw', derivedKey)
+  return new Uint8Array(result)
 }
 
 function xor(a, b) {
   return a.map((item, i) => item ^ b[i])
 }
 
-const RandomSalt = () => {
-  var salt = window.crypto.getRandomValues(new Uint8Array(12))
-  return bytesToBase64(salt)
+function generateRandomSalt() {
+  return bytesToBase64(generateRandomValues(12))
 }
 
-const MainKeyGenerator = ({
+function createMainKeyGenerator({
   masterPassword = '0000',
   recoveryKey,
   recoveryKeyId,
-  salt = RandomSalt(),
-  user,
-}) => {
-  var generate = () => {
-    return pbkdf2(masterPassword, bitsToHex(hkdf(utfToBits(salt), user.id))).then(pbkdf2Bytes => {
-      const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey), recoveryKeyId))
-
-      const mainKeyBytes = new Uint8Array(xor(pbkdf2Bytes, hkdfBytes))
-
-      return KeyImport(mainKeyBytes)
-    })
-  }
-
+  salt = generateRandomSalt(),
+  userId,
+}) {
   return {
     salt,
-    generate,
+    generate: async () => {
+      const pbkdf2Bytes = await pbkdf2(masterPassword, bitsToHex(hkdf(utfToBits(salt), userId)))
+      const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey), recoveryKeyId))
+      const mainKeyBytes = new Uint8Array(xor(pbkdf2Bytes, hkdfBytes))
+
+      return importKey(mainKeyBytes)
+    },
   }
 }
 
-const UserKeyGenerator = () => {
-  var keyParams = {
+const generateUserKey = () => {
+  const algorithm = {
     name: 'RSA-OAEP',
     modulusLength: 2048,
     publicExponent: new Uint8Array([1, 0, 1]),
@@ -402,130 +66,251 @@ const UserKeyGenerator = () => {
     },
   }
 
-  var generate = function () {
-    return window.crypto.subtle.generateKey(keyParams, true, ['encrypt', 'decrypt'])
+  return window.crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
+}
+
+async function exportKey(key, kid) {
+  const jwk = await window.crypto.subtle.exportKey('jwk', key)
+  return Object.assign(jwk, { kid })
+}
+
+function importKey(keyBytes) {
+  const algorithm = { name: 'AES-GCM' }
+  return window.crypto.subtle.importKey('raw', keyBytes, algorithm, true, ['encrypt', 'decrypt'])
+}
+
+function getAlgorightByName(name) {
+  switch (name) {
+    case 'RSA-OAEP-256': {
+      return { name: 'RSA-OAEP', hash: { name: 'SHA-256' } }
+    }
+    default: {
+      return { name: 'AES-GCM' }
+    }
+  }
+}
+
+function importJwk(jwk) {
+  return window.crypto.subtle.importKey('jwk', jwk, getAlgorightByName(jwk.alg), true, jwk.key_ops)
+}
+
+function generateRandomValues(length) {
+  return window.crypto.getRandomValues(new Uint8Array(length))
+}
+
+function generateKey() {
+  const algorithm = { name: 'AES-GCM', length: 256 }
+  return crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
+}
+
+function encryptAES(iv, key, data) {
+  const algorithm = { name: 'AES-GCM', iv }
+  return window.crypto.subtle.encrypt(algorithm, key, data)
+}
+
+function encryptRSA(publicKey, data) {
+  const algorithm = { name: 'RSA-OAEP' }
+  return window.crypto.subtle.encrypt(algorithm, publicKey, data)
+}
+
+async function decryptRSA(privateKey, base64data) {
+  const algorithm = { name: 'RSA-OAEP' }
+  const data = new Uint8Array(base64ToBytes(base64data)).buffer
+  const result = await window.crypto.subtle.decrypt(algorithm, privateKey, data)
+
+  return bytesToUtf(new Uint8Array(result))
+}
+
+async function decryptAES(base64iv, key, base64data) {
+  const iv = new Uint8Array(base64ToBytes(base64iv))
+  const algorithm = { name: 'AES-GCM', iv }
+  const data = new Uint8Array(base64ToBytes(base64data)).buffer
+  const result = await window.crypto.subtle.decrypt(algorithm, key, data)
+
+  return bytesToUtf(new Uint8Array(result))
+}
+
+async function createKey({ key, kid, jwk }) {
+  if (key) {
+    return { crypto: key, id: kid, jwk: await exportKey(key, kid) }
+  }
+
+  return { jwk, id: jwk.kid, crypto: await importJwk(jwk) }
+}
+
+async function createCredentialKey({ publicKey }) {
+  const key = await createKey({ key: await generateKey(), kid: nanoid() })
+  const encodedKey = textEncode(JSON.stringify(key.jwk))
+
+  const result = await encryptRSA(publicKey.crypto, encodedKey)
+  const data = bytesToBase64(new Uint8Array(result))
+
+  return {
+    encrypted: {
+      kid: publicKey.id,
+      enc: 'RSA-OAEP',
+      cty: 'b5+jwk+json',
+      data,
+    },
+    id: () => key.id,
+    crypto: () => key.crypto,
+  }
+}
+
+async function createEncryptedCredentialKey({ encryptedData, privateKey }) {
+  const jwk = await decryptRSA(privateKey.crypto, encryptedData.data)
+  const key = await createKey({ jwk: JSON.parse(jwk) })
+
+  return {
+    crypto: () => key.crypto,
+  }
+}
+
+export const CredentialOwners = Object.freeze({
+  PERSONAL: 'User',
+  TEAM: 'Team',
+})
+
+export async function prepareUserCredentials({ keySet, data }) {
+  const credential = await createCredential({ data, publicKey: keySet.publicKey })
+
+  return {
+    data: credential.encrypted,
+    key: credential.key.encrypted,
+    publicKeyId: keySet.publicKeyId,
+  }
+}
+
+export async function createCredential({ publicKey, data }) {
+  const key = await createCredentialKey({ publicKey: await createKey({ jwk: publicKey }) })
+  const iv = generateRandomValues(12)
+  const result = await encryptAES(iv, key.crypto(), textEncode(JSON.stringify(data)))
+  const data = bytesToBase64(new Uint8Array(result))
+
+  return {
+    key,
+    encrypted: {
+      kid: key.id(),
+      enc: 'A256GCM',
+      cty: 'b5+jwk+json',
+      iv: bytesToBase64(iv),
+      data,
+    },
+  }
+}
+
+export async function createEncryptedCredential({
+  encryptedData,
+  encryptedKeyData,
+  privateKey,
+  id,
+}) {
+  const key = await createEncryptedCredentialKey({ encryptedData: encryptedKeyData, privateKey })
+  const data = await decryptAES(encryptedData.iv, key.crypto(), encryptedData.data)
+
+  return { id, data, encryptedData }
+}
+
+export function createRecoveryKey(userId, options = {}) {
+  const storage = options.storage || window.localStorage
+  const key = `USER_${userId}`
+
+  return {
+    get: () => {
+      const raw = storage.getItem(key)
+      const [id, ...tail] = raw.split('-')
+      return { raw, id, value: tail.join('') }
+    },
+    reset: () => storage.removeItem(key),
+    set: raw => storage.removeItem(key, raw),
+  }
+}
+
+export function createEncryptedKeySet({
+  userId,
+  rawPublicKey,
+  publicKeyId,
+  encryptedPrivateKey,
+  salt,
+}) {
+  const { id: recoveryKeyId, value: recoveryKey } = createRecoveryKey(userId).get()
+  const mainKeyGenerator = createMainKeyGenerator({
+    recoveryKey,
+    recoveryKeyId,
+    userId,
+    salt,
+  })
+
+  let mainKey, privateKey, publicKey
+
+  const decryptAll = async () => {
+    mainKey = await createKey({ kid: 'main', key: await mainKeyGenerator.generate() })
+
+    const privateJwkStr = await decryptAES(
+      encryptedPrivateKey.iv,
+      mainKey.crypto,
+      encryptedPrivateKey.data,
+    )
+    privateKey = await createKey({ jwk: JSON.parse(privateJwkStr) })
+    publicKey = await createKey({ jwk: rawPublicKey })
   }
 
   return {
-    generate,
+    decryptAll,
+    publicKeyId,
+    encPrivateKey: encryptedPrivateKey,
+    salt,
+    mainKey: () => mainKey,
+    privateKey: () => privateKey,
+    publicKey: () => publicKey,
   }
 }
 
-const KeyExport = function (key, kid) {
-  return window.crypto.subtle.exportKey('jwk', key).then(jwk => Object.assign(jwk, { kid }))
-}
+export async function createKeySet(userId) {
+  const { id: recoveryKeyId, value: recoveryKey } = createRecoveryKey(userId).get()
+  const mainKeyGenerator = createMainKeyGenerator({ recoveryKey, recoveryKeyId, userId })
+  const salt = mainKeyGenerator.salt
 
-const KeyImport = function (keyBytes) {
-  return window.crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, true, [
-    'encrypt',
-    'decrypt',
-  ])
-}
+  let privateKey, publicKey, mainKey
 
-const JwkImport = function (jwk) {
-  var algo
-  switch (jwk.alg) {
-    case 'RSA-OAEP-256': {
-      algo = {
-        name: 'RSA-OAEP',
-        hash: { name: 'SHA-256' },
-      }
-      break
-    }
-    default: {
-      algo = { name: 'AES-GCM' }
+  const generateUserKeys = async () => {
+    const key = await generateUserKey()
+    return Promise.all([
+      createKey({ key: key.privateKey, kid: privateKey }),
+      createKey({ key: key.publicKey, kid: nanoid() }),
+    ])
+  }
+
+  const encryptPrivateKey = async () => {
+    const iv = generateRandomValues(12)
+    const encodedPrivateKey = textEncode(JSON.stringify(privateKey.jwk))
+
+    const result = await encryptAES(iv, mainKey.crypto, encodedPrivateKey)
+    const data = bytesToBase64(new Uint8Array(result))
+
+    return {
+      kid: 'main',
+      enc: 'A256GCM',
+      cty: 'b5+jwk+json',
+      iv: bytesToBase64(iv),
+      data,
     }
   }
 
-  return window.crypto.subtle.importKey('jwk', jwk, algo, true, jwk.key_ops)
-}
+  const generateAll = async () => {
+    ;[privateKey, publicKey] = await generateUserKeys()
+    mainKey = await createKey({ kid: 'main', key: await mainKeyGenerator.generate() })
+    encPrivateKey = await encryptPrivateKey()
+  }
 
-const KeyGenerate = function () {
-  return crypto.subtle.generateKey(
-    {
-      name: 'AES-GCM',
-      length: 256,
-    },
-    true,
-    ['encrypt', 'decrypt'],
-  )
-}
-
-const Encrypt = function (iv, key, data) {
-  return window.crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv,
-    },
-    key,
-    data,
-  )
-}
-
-const RsaEncrypt = function (publicKey, data) {
-  return window.crypto.subtle.encrypt(
-    {
-      name: 'RSA-OAEP',
-    },
-    publicKey,
-    data,
-  )
-}
-
-const RsaDecrypt = function (privateKey, base64data) {
-  return window.crypto.subtle
-    .decrypt(
-      {
-        name: 'RSA-OAEP',
-      },
-      privateKey,
-      new Uint8Array(base64ToBytes(base64data)).buffer,
-    )
-    .then(result => bytesToUtf(new Uint8Array(result)))
-}
-
-const Decrypt = function (base64iv, key, base64data) {
-  return window.crypto.subtle
-    .decrypt(
-      {
-        name: 'AES-GCM',
-        iv: new Uint8Array(base64ToBytes(base64iv)),
-      },
-      key,
-      new Uint8Array(base64ToBytes(base64data)).buffer,
-    )
-    .then(result => bytesToUtf(new Uint8Array(result)))
-}
-
-const CredentialOwners = {
-  PERSONAL: 'User',
-  TEAM: 'Team',
-}
-
-const PrepareUserCredentials = ({ keySet, data }) => {
-  console.log('PrepareUserCredentials', keySet)
-  console.log('PrepareUserCredentials', data)
-
-  const publicKey = keySet.publicKey
-  const publicKeyId = keySet.publicKeyId
-
-  return new Promise((res, rej) =>
-    res(
-      new Credential({ publicKey, data }).then(credential => ({
-        data: credential.encrypted,
-        key: credential.key.encrypted,
-        publicKeyId,
-      })),
-    ),
-  )
-}
-
-export {
-  KeySet,
-  RecoveryKey,
-  EncryptedKeySet,
-  Credential,
-  EncryptedCredential,
-  CredentialOwners,
-  PrepareUserCredentials,
+  return {
+    recoveryKey,
+    recoveryKeyId,
+    salt,
+    generateAll,
+    mainKey: () => mainKey,
+    publicKey: () => publicKey,
+    privateKey: () => privateKey,
+    encPrivateKey: encryptedPrivateKey,
+  }
 }
