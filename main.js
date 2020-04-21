@@ -1,10 +1,14 @@
-import { nanoid } from 'nanoid'
+import { nanoid, customAlphabet } from 'nanoid'
 import * as base64Codec from './sjcl/base64.js'
 import * as bytesCodec from './sjcl/bytes.js'
 import * as utf8StringCodec from './sjcl/utf8String.js'
 import * as hexCodec from './sjcl/hex.js'
 import { HKDF } from './sjcl/hkdf.js'
 import { SHA256 } from './sjcl/sha256.js'
+
+const RECOVERY_KEY_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTVWXYZ'
+const RECOVERY_KEY_GROUPS_COUNT = 6
+const generateRecoveryGroup = customAlphabet(RECOVERY_KEY_ALPHABET, 6)
 
 const textEncode = string => new TextEncoder().encode(string)
 const bytesToBase64 = bytes => base64Codec.fromBits(bytesCodec.toBits(bytes))
@@ -122,8 +126,18 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
         const [id, ...tail] = raw.split('-')
         return { raw, id, value: tail.join('') }
       },
+      generate: () => {
+        const result = []
+        for (let i = 0; i < RECOVERY_KEY_GROUPS_COUNT; i += 1) {
+          result.push(generateRecoveryGroup())
+        }
+        const raw = result.join('-')
+        storage.setItem(key, raw)
+
+        return raw
+      },
       reset: () => storage.removeItem(key),
-      set: raw => storage.removeItem(key, raw),
+      set: raw => storage.setItem(key, raw),
     }
   }
 
