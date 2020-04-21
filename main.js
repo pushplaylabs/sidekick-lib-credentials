@@ -123,6 +123,10 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     return {
       get: () => {
         const raw = storage.getItem(key)
+        if (!raw) {
+          return null
+        }
+
         const [id, ...tail] = raw.split('-')
         return { raw, id, value: tail.join('') }
       },
