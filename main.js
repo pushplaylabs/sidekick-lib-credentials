@@ -119,16 +119,15 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   function initRecoveryKey(userId) {
     const key = `USER_${userId}`
+    const extractData = raw => {
+      const [id, ...tail] = raw.split('-')
+      return { raw, id, value: tail.join('') }
+    }
 
     return {
       get: () => {
         const raw = storage.getItem(key)
-        if (!raw) {
-          return null
-        }
-
-        const [id, ...tail] = raw.split('-')
-        return { raw, id, value: tail.join('') }
+        return raw ? extractData(raw) : null
       },
       generate: () => {
         const result = []
@@ -138,7 +137,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
         const raw = result.join('-')
         storage.setItem(key, raw)
 
-        return raw
+        return extractData(raw)
       },
       reset: () => storage.removeItem(key),
       set: raw => storage.setItem(key, raw),
