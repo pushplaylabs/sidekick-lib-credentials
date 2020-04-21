@@ -1,15 +1,20 @@
 import { nanoid } from 'nanoid'
-import sjcl from './sjcl.min.js'
+import * as base64Codec from './sjcl/base64.js'
+import * as bytesCodec from './sjcl/bytes.js'
+import * as utf8StringCodec from './sjcl/utf8String.js'
+import * as hexCodec from './sjcl/hex.js'
+import { HKDF } from './sjcl/hkdf.js'
+import { SHA256 } from './sjcl/sha256.js'
 
 const textEncode = string => new TextEncoder().encode(string)
-const bytesToBase64 = bytes => sjcl.codec.base64.fromBits(sjcl.codec.bytes.toBits(bytes))
-const base64ToBytes = base64 => sjcl.codec.bytes.fromBits(sjcl.codec.base64.toBits(base64))
-const utfToBits = utf8String => sjcl.codec.utf8String.toBits(utf8String)
-const bytesToUtf = bytes => sjcl.codec.utf8String.fromBits(sjcl.codec.bytes.toBits(bytes))
-const bitsToHex = bits => sjcl.codec.hex.fromBits(bits)
-const bitsToBytes = bits => sjcl.codec.bytes.fromBits(bits)
+const bytesToBase64 = bytes => base64Codec.fromBits(bytesCodec.toBits(bytes))
+const base64ToBytes = base64 => bytesCodec.fromBits(base64Codec.toBits(base64))
+const utfToBits = utf8String => utf8StringCodec.toBits(utf8String)
+const bytesToUtf = bytes => utf8StringCodec.fromBits(bytesCodec.toBits(bytes))
+const bitsToHex = bits => hexCodec.fromBits(bits)
+const bitsToBytes = bits => bytesCodec.fromBits(bits)
 const hkdf = (string, string2, version = 'PBES2g-HS256') =>
-  sjcl.misc.hkdf(string, 256, string2, version, sjcl.hash.sha256)
+  HKDF(string, 256, string2, version, SHA256)
 
 function xor(a, b) {
   return a.map((item, i) => item ^ b[i])
