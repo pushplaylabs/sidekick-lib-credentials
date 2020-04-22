@@ -8,7 +8,8 @@ import { SHA256 } from './sjcl/sha256.js'
 
 const RECOVERY_KEY_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTVWXYZ'
 const RECOVERY_KEY_GROUPS_COUNT = 6
-const generateRecoveryGroup = customAlphabet(RECOVERY_KEY_ALPHABET, 6)
+const generateRecoverySixSymbols = customAlphabet(RECOVERY_KEY_ALPHABET, 6)
+const generateRecoveryFiveSymbols = customAlphabet(RECOVERY_KEY_ALPHABET, 5)
 
 const textEncode = string => new TextEncoder().encode(string)
 const bytesToBase64 = bytes => base64Codec.fromBits(bytesCodec.toBits(bytes))
@@ -117,32 +118,29 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   const generateRandomSalt = () => bytesToBase64(generateRandomBytes(12))
 
-  function initRecoveryKey(userId) {
-    const key = `USER_${userId}`
+  const recoveryKeyManager = (() => {
+    const getKey = userId => `USER_${userId}`
     const extractData = raw => {
       const [id, ...tail] = raw.split('-')
       return { raw, id, value: tail.join('') }
     }
 
     return {
-      get: () => {
-        const raw = storage.getItem(key)
+      get: userId => {
+        const raw = storage.getItem(getKey(userId))
         return raw ? extractData(raw) : null
       },
       generate: () => {
         const result = []
         for (let i = 0; i < RECOVERY_KEY_GROUPS_COUNT; i += 1) {
-          result.push(generateRecoveryGroup())
+          result.push(i < 2 ? generateRecoverySixSymbols() : generateRecoveryFiveSymbols())
         }
-        const raw = result.join('-')
-        storage.setItem(key, raw)
-
-        return extractData(raw)
+        return extractData(result.join('-'))
       },
-      reset: () => storage.removeItem(key),
-      set: raw => storage.setItem(key, raw),
+      reset: userId => storage.removeItem(getKey(userId)),
+      set: (userId, raw) => storage.setItem(getKey(userId), raw),
     }
-  }
+  })()
 
   function createMainKeyGenerator({
     masterPassword = '0000',
@@ -234,7 +232,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
   }
 
   function createEncryptedKeySet({ userId, publicKeyRaw, publicKeyId, encryptedPrivateKey, salt }) {
-    const { id: recoveryKeyId, value: recoveryKey } = initRecoveryKey(userId).get()
+    const { id: recoveryKeyId, value: recoveryKey } = recoveryKeyManager.get(userId)
     const mainKeyGenerator = createMainKeyGenerator({
       recoveryKey,
       recoveryKeyId,
@@ -268,7 +266,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
   }
 
   async function createKeySet(userId) {
-    const { id: recoveryKeyId, value: recoveryKey } = initRecoveryKey(userId).get()
+    const { id: recoveryKeyId, value: recoveryKey } = recoveryKeyManager.get(userId)
     const mainKeyGenerator = createMainKeyGenerator({ recoveryKey, recoveryKeyId, userId })
     const salt = mainKeyGenerator.salt
 
@@ -321,7 +319,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   return {
     prepareUserCredentials,
-    initRecoveryKey,
+    recoveryKeyManager,
     createKeySet,
     createEncryptedKeySet,
     createEncryptedCredential,
