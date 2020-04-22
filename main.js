@@ -60,7 +60,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   const generateUserKeys = async () => {
     const key = await generateUserKey()
-    const [privateKey, publicKey] = Promise.all([
+    const [privateKey, publicKey] = await Promise.all([
       createKey({ key: key.privateKey, kid: nanoid() }),
       createKey({ key: key.publicKey, kid: nanoid() }),
     ])
