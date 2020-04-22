@@ -183,7 +183,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     return { jwk, id: jwk.kid, crypto: await importJwk(jwk) }
   }
 
-  async function createCredentialKey({ publicKey }) {
+  async function encryptCredentialKey({ publicKey }) {
     const key = await createKey({ key: await generateKey(), kid: nanoid() })
     const encodedKey = textEncode(JSON.stringify(key.jwk))
 
@@ -212,7 +212,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
   }
 
   async function prepareUserCredentials({ keySet, data }) {
-    const credential = await createCredential({ data, publicKey: keySet.publicKey })
+    const credential = await encryptCredential({ data, publicKey: keySet.publicKey })
 
     return {
       data: credential.encrypted,
@@ -221,8 +221,8 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   }
 
-  async function createCredential({ publicKey, data }) {
-    const key = await createCredentialKey({ publicKey: await createKey({ jwk: publicKey }) })
+  async function encryptCredential({ publicKey, data }) {
+    const key = await encryptCredentialKey({ publicKey: await createKey({ jwk: publicKey }) })
     const iv = generateRandomBytes(12)
     const result = await encryptAES(iv, key.crypto, textEncode(JSON.stringify(data)))
 
@@ -238,11 +238,10 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   }
 
-  async function decryptCredential({ encryptedData, encryptedKeyData, privateKey, id }) {
+  async function decryptCredential({ encryptedData, encryptedKeyData, privateKey }) {
     const key = await decryptCredentialKey({ encryptedData: encryptedKeyData, privateKey })
     const data = await decryptAES(encryptedData.iv, key.crypto, encryptedData.data)
-
-    return { id, data, encryptedData }
+    return JSON.parse(data)
   }
 
   async function decryptKeySet({ userId, recoveryKey, publicKeyRaw, encryptedPrivateKey, salt }) {
@@ -289,7 +288,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     recoveryKeyManager,
     createKeySet,
     decryptKeySet,
-    createCredential,
+    encryptCredential,
     decryptCredential,
     encryptPrivateKey,
     prepareUserCredentials,
