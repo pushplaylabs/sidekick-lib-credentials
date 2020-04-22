@@ -167,15 +167,9 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   })()
 
-  async function generateMainKey({
-    masterPassword = '0000',
-    recoveryKey,
-    recoveryKeyId,
-    salt,
-    userId,
-  }) {
+  async function generateMainKey({ masterPassword = '0000', recoveryKey, salt, userId }) {
     const pbkdf2Bytes = await pbkdf2(masterPassword, bitsToHex(hkdf(utfToBits(salt), userId)))
-    const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey), recoveryKeyId))
+    const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey.value), recoveryKey.id))
     const mainKeyBytes = new Uint8Array(xor(pbkdf2Bytes, hkdfBytes))
 
     return importKey(mainKeyBytes)
@@ -251,11 +245,10 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     return { id, data, encryptedData }
   }
 
-  async function decryptKeySet({ userId, publicKeyRaw, publicKeyId, encryptedPrivateKey, salt }) {
-    const { id: recoveryKeyId, value: recoveryKey } = recoveryKeyManager.get(userId)
+  async function decryptKeySet({ userId, recoveryKey, publicKeyRaw, encryptedPrivateKey, salt }) {
     const mainKey = await createKey({
       kid: 'main',
-      key: await generateMainKey({ recoveryKey, recoveryKeyId, userId, salt }),
+      key: await generateMainKey({ userId, recoveryKey, salt }),
     })
 
     const privateJwkStr = await decryptAES(
@@ -269,35 +262,26 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     ])
 
     return {
-      publicKeyId,
-      encPrivateKey: encryptedPrivateKey,
-      salt,
-      mainKey: () => mainKey,
-      privateKey: () => privateKey,
-      publicKey: () => publicKey,
+      mainKey,
+      privateKey,
+      publicKey,
     }
   }
 
-  async function createKeySet(userId) {
-    const { id: recoveryKeyId, value: recoveryKey } = recoveryKeyManager.get(userId)
+  async function createKeySet({ userId, recoveryKey }) {
     const salt = generateRandomSalt()
-
     const [mainKey, { publicKey, privateKey }] = await Promise.all([
-      createKey({
-        kid: 'main',
-        key: await generateMainKey({ recoveryKey, recoveryKeyId, userId, salt }),
-      }),
+      Promise.resolve()
+        .then(() => generateMainKey({ userId, recoveryKey, salt }))
+        .then(key => createKey({ kid: 'main', key })),
       generateUserKeys(),
     ])
 
     return {
-      recoveryKey,
-      recoveryKeyId,
       salt,
       mainKey,
       publicKey,
       privateKey,
-      encPrivateKey: await encryptPrivateKey(mainKey, privateKey),
     }
   }
 
@@ -307,6 +291,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     decryptKeySet,
     createCredential,
     decryptCredential,
+    encryptPrivateKey,
     prepareUserCredentials,
   }
 }
