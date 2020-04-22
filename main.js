@@ -58,6 +58,15 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     return crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
   }
 
+  const generateUserKeys = async () => {
+    const key = await generateUserKey()
+    const [privateKey, publicKey] = Promise.all([
+      createKey({ key: key.privateKey, kid: nanoid() }),
+      createKey({ key: key.publicKey, kid: nanoid() }),
+    ])
+    return { privateKey, publicKey }
+  }
+
   const exportKey = async (key, kid) => {
     const jwk = await crypto.subtle.exportKey('jwk', key)
     return Object.assign(jwk, { kid })
@@ -118,6 +127,22 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   const generateRandomSalt = () => bytesToBase64(generateRandomBytes(12))
 
+  const encryptPrivateKey = async (mainKey, privateKey) => {
+    const iv = generateRandomBytes(12)
+    const encodedPrivateKey = textEncode(JSON.stringify(privateKey.jwk))
+
+    const result = await encryptAES(iv, mainKey.crypto, encodedPrivateKey)
+    const data = bytesToBase64(new Uint8Array(result))
+
+    return {
+      kid: 'main',
+      enc: 'A256GCM',
+      cty: 'b5+jwk+json',
+      iv: bytesToBase64(iv),
+      data,
+    }
+  }
+
   const recoveryKeyManager = (() => {
     const getKey = userId => `USER_${userId}`
     const extractData = raw => {
@@ -142,23 +167,18 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   })()
 
-  function createMainKeyGenerator({
+  async function generateMainKey({
     masterPassword = '0000',
     recoveryKey,
     recoveryKeyId,
-    salt = generateRandomSalt(),
+    salt,
     userId,
   }) {
-    return {
-      salt,
-      generate: async () => {
-        const pbkdf2Bytes = await pbkdf2(masterPassword, bitsToHex(hkdf(utfToBits(salt), userId)))
-        const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey), recoveryKeyId))
-        const mainKeyBytes = new Uint8Array(xor(pbkdf2Bytes, hkdfBytes))
+    const pbkdf2Bytes = await pbkdf2(masterPassword, bitsToHex(hkdf(utfToBits(salt), userId)))
+    const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey), recoveryKeyId))
+    const mainKeyBytes = new Uint8Array(xor(pbkdf2Bytes, hkdfBytes))
 
-        return importKey(mainKeyBytes)
-      },
-    }
+    return importKey(mainKeyBytes)
   }
 
   async function createKey({ key, kid, jwk }) {
@@ -183,17 +203,17 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
         cty: 'b5+jwk+json',
         data,
       },
-      id: () => key.id,
-      crypto: () => key.crypto,
+      id: key.id,
+      crypto: key.crypto,
     }
   }
 
-  async function createEncryptedCredentialKey({ encryptedData, privateKey }) {
+  async function decryptCredentialKey({ encryptedData, privateKey }) {
     const jwk = await decryptRSA(privateKey.crypto, encryptedData.data)
     const key = await createKey({ jwk: JSON.parse(jwk) })
 
     return {
-      crypto: () => key.crypto,
+      crypto: key.crypto,
     }
   }
 
@@ -210,12 +230,12 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
   async function createCredential({ publicKey, data }) {
     const key = await createCredentialKey({ publicKey: await createKey({ jwk: publicKey }) })
     const iv = generateRandomBytes(12)
-    const result = await encryptAES(iv, key.crypto(), textEncode(JSON.stringify(data)))
+    const result = await encryptAES(iv, key.crypto, textEncode(JSON.stringify(data)))
 
     return {
       key,
       encrypted: {
-        kid: key.id(),
+        kid: key.id,
         enc: 'A256GCM',
         cty: 'b5+jwk+json',
         iv: bytesToBase64(iv),
@@ -224,38 +244,31 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   }
 
-  async function createEncryptedCredential({ encryptedData, encryptedKeyData, privateKey, id }) {
-    const key = await createEncryptedCredentialKey({ encryptedData: encryptedKeyData, privateKey })
-    const data = await decryptAES(encryptedData.iv, key.crypto(), encryptedData.data)
+  async function decryptCredential({ encryptedData, encryptedKeyData, privateKey, id }) {
+    const key = await decryptCredentialKey({ encryptedData: encryptedKeyData, privateKey })
+    const data = await decryptAES(encryptedData.iv, key.crypto, encryptedData.data)
 
     return { id, data, encryptedData }
   }
 
-  function createEncryptedKeySet({ userId, publicKeyRaw, publicKeyId, encryptedPrivateKey, salt }) {
+  async function decryptKeySet({ userId, publicKeyRaw, publicKeyId, encryptedPrivateKey, salt }) {
     const { id: recoveryKeyId, value: recoveryKey } = recoveryKeyManager.get(userId)
-    const mainKeyGenerator = createMainKeyGenerator({
-      recoveryKey,
-      recoveryKeyId,
-      userId,
-      salt,
+    const mainKey = await createKey({
+      kid: 'main',
+      key: await generateMainKey({ recoveryKey, recoveryKeyId, userId, salt }),
     })
 
-    let mainKey, privateKey, publicKey
-
-    const decryptAll = async () => {
-      mainKey = await createKey({ kid: 'main', key: await mainKeyGenerator.generate() })
-
-      const privateJwkStr = await decryptAES(
-        encryptedPrivateKey.iv,
-        mainKey.crypto,
-        encryptedPrivateKey.data,
-      )
-      privateKey = await createKey({ jwk: JSON.parse(privateJwkStr) })
-      publicKey = await createKey({ jwk: publicKeyRaw })
-    }
+    const privateJwkStr = await decryptAES(
+      encryptedPrivateKey.iv,
+      mainKey.crypto,
+      encryptedPrivateKey.data,
+    )
+    const [privateKey, publicKey] = await Promise.all([
+      createKey({ jwk: JSON.parse(privateJwkStr) }),
+      createKey({ jwk: publicKeyRaw }),
+    ])
 
     return {
-      decryptAll,
       publicKeyId,
       encPrivateKey: encryptedPrivateKey,
       salt,
@@ -267,62 +280,33 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   async function createKeySet(userId) {
     const { id: recoveryKeyId, value: recoveryKey } = recoveryKeyManager.get(userId)
-    const mainKeyGenerator = createMainKeyGenerator({ recoveryKey, recoveryKeyId, userId })
-    const salt = mainKeyGenerator.salt
+    const salt = generateRandomSalt()
 
-    let privateKey, publicKey, mainKey, encPrivateKey
-
-    const generateUserKeys = async () => {
-      const key = await generateUserKey()
-      const results = Promise.all([
-        createKey({ key: key.privateKey, kid: privateKey }),
-        createKey({ key: key.publicKey, kid: nanoid() }),
-      ])
-      return { privateKey: results[0], publicKey: results[1] }
-    }
-
-    const encryptPrivateKey = async () => {
-      const iv = generateRandomBytes(12)
-      const encodedPrivateKey = textEncode(JSON.stringify(privateKey.jwk))
-
-      const result = await encryptAES(iv, mainKey.crypto, encodedPrivateKey)
-      const data = bytesToBase64(new Uint8Array(result))
-
-      return {
+    const [mainKey, { publicKey, privateKey }] = await Promise.all([
+      createKey({
         kid: 'main',
-        enc: 'A256GCM',
-        cty: 'b5+jwk+json',
-        iv: bytesToBase64(iv),
-        data,
-      }
-    }
-
-    const generateAll = async () => {
-      const userKeys = await generateUserKeys()
-      privateKey = userKeys.privateKey
-      publicKey = userKeys.publicKey
-      mainKey = await createKey({ kid: 'main', key: await mainKeyGenerator.generate() })
-      encPrivateKey = await encryptPrivateKey()
-    }
+        key: await generateMainKey({ recoveryKey, recoveryKeyId, userId, salt }),
+      }),
+      generateUserKeys(),
+    ])
 
     return {
       recoveryKey,
       recoveryKeyId,
       salt,
-      generateAll,
-      mainKey: () => mainKey,
-      publicKey: () => publicKey,
-      privateKey: () => privateKey,
-      encPrivateKey: () => encPrivateKey,
+      mainKey,
+      publicKey,
+      privateKey,
+      encPrivateKey: await encryptPrivateKey(mainKey, privateKey),
     }
   }
 
   return {
-    prepareUserCredentials,
     recoveryKeyManager,
     createKeySet,
-    createEncryptedKeySet,
-    createEncryptedCredential,
+    decryptKeySet,
     createCredential,
+    decryptCredential,
+    prepareUserCredentials,
   }
 }
