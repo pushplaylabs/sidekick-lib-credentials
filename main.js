@@ -6,140 +6,288 @@ import * as hexCodec from './sjcl/hex.js'
 import { HKDF } from './sjcl/hkdf.js'
 import { SHA256 } from './sjcl/sha256.js'
 
+
+//------------------ MOVE TO CRYPTO WRAPPER: START ---------------------
+
+const RSA_ALGORITHM = { name: 'RSA-OAEP', hash: { name: 'SHA-256' } }
+const AES_ALGORITHM = { name: 'AES-GCM' }
+
+/**
+ * Converts Array-like object with bytes (sjcl byte array) to base64 string
+ * @param {array} bytes
+ * @return {string}
+ */
+const encode64 = (bytes) => base64Codec.fromBits(bytesCodec.toBits(bytes))
+
+/**
+ * Converts base64 string to Array-like object (sjcl byte array)
+ * @param {string} base64String
+ * @return {array} Array-like object (sjcl byte array)
+ */
+const decode64 = (base64String) =>
+  bytesCodec.fromBits(base64Codec.toBits(base64String))
+
+/**
+ * Converts JSON object to Uint8Array
+ * @param {object} jsonObject
+ * @return {Uint8Array}
+ */
+const jsonToBytes = (jsonObject) =>
+  (new TextEncoder()).encode(JSON.stringify(jsonObject))
+
+/**
+ * Converts Uint8Array to JSON object
+ * @param {object} Uint8Array
+ * @return {Uint8Array}
+ */
+const bytesToJSON = (bytes) => JSON.parse(bytesToUtf(bytes))
+
+// TODO: add description
+const textToBits = utf8String => utf8StringCodec.toBits(utf8String)
+const bytesToUtf = bytes => utf8StringCodec.fromBits(bytesCodec.toBits(bytes))
+const bitsToHex = bits => hexCodec.fromBits(bits)
+const bitsToBytes = bits => bytesCodec.fromBits(bits)
+
+/**
+ * Converts string to Uint8Array
+ * @param {string} text
+ * @return {Uint8Array}
+ */
+const textToBytes = (text) => new Uint8Array(bitsToBytes(textToBits(password)))
+
+/**
+ * @param {String|bitArray} ikm - The input keying material.
+ * @param {String|bitArray} salt - The salt for HKDF.
+ * @return {bitArray} derived key.
+ */
+const hkdf = (ikm, salt) => {
+  const material = typeof ikm === 'string' ? textToBits(ikm) : ikm;
+  const keyBitLength = 256;
+  const version = 'PBES2g-HS256';
+
+  return HKDF(material, keyBitLength, salt, version, SHA256);
+}
+
+/**
+ * xor operation for two Array-like object (sjcl byte array)
+ * @param {array} a - Array-like object (sjcl byte array | Uint8Array)
+ * @param {array} b - Array-like object (sjcl byte array | Uint8Array)
+ * @return {array} - Array-like object
+ */
+const xor = (a, b) => a.map((item, i) => item ^ b[i])
+
+/**
+ * PBKDF2
+ * @param {string} password
+ * @param {Uint8Array} salt
+ * @return {Promise} - Promise<Uint8Array> with derived key
+ */
+const pbkdf2 = async (password, salt) => {
+  const Crypto = window.crypto.subtle
+  const pwdBytes = textToBytes(password)
+
+  const importAlg = { name: 'PBKDF2' }
+  const AESOptions = { name: 'AES-GCM', length: 256 }
+  const deriveAlg = {
+    name: 'PBKDF2',
+    iterations: 100000,
+    hash: { name: 'SHA-256' },
+    salt
+  }
+
+  const key = await Crypto.importKey('raw', pwdBytes, importAlg, false, ['deriveKey'])
+  const derivedKey = await Crypto.deriveKey(deriveAlg, key, AESOptions, true, ['encrypt'])
+  const result = await Crypto.exportKey('raw', derivedKey)
+
+  return new Uint8Array(result)
+}
+
+
+// FIXME: add key type to properties
+class ExtendedKey {
+  constructor(options = {}) {
+    this.kid = options.kid || nanoid()
+    this.jwk = options.jwk
+    this.crypto = options.cryptoKey
+  }
+
+  async static unpack(jwk) {
+    const Crypto = window.crypto.subtle
+    let algorithm = AES_ALGORITHM
+
+    if (jwk.alg === 'RSA-OAEP-256') algorithm = RSA_ALGORITHM
+
+    const cryptoKey = await Crypto.importKey('jwk', jwk, algorithm, true, jwk.key_ops)
+
+    return new ExtendedKey({ cryptoKey, kid: jwk.kid, jwk })
+  }
+
+  async pack() {
+    if (this.jwk) return this.jwk
+
+    const Crypto = window.crypto.subtle
+    const jwk = await Crypto.exportKey('jwk', this.crypto)
+    jwk.kid = this.kid
+
+    this.jwk = jwk
+
+    return this.jwk
+  }
+
+  async packBytes() {
+    const jwk = await this.pack()
+
+    return jsonToBytes(jwk)
+  }
+}
+
+class PublicKey {
+  constructor(cryptoKey) {
+    this.cryptoKey = cryptoKey
+  }
+
+  /**
+   * Encrypts data with OAEP
+   * @param {Uint8Array} data
+   * @return {Promise} - Promise<Uint8Array> with encrypted data
+   */
+  async encrypt(data) {
+    const algorithm = { name: 'RSA-OAEP' }
+    const encrypted = await crypto.subtle.encrypt(algorithm, this.cryptoKey, data)
+
+    return new Uint8Array(encrypted)
+  }
+}
+
+class PrivateKey {
+  constructor(cryptoKey) {
+    this.cryptoKey = cryptoKey
+    this._publicKey = null
+  }
+
+  // FIXME: crypto.subtle disallows get public key from private sync
+  _setPublicKey(cryptoKey) { this._publicKey = cryptoKey }
+
+  // FIXME: crypto.subtle disallows get public key from private sync
+  _calcPublicKey() {
+    const Crypto = window.crypto.subtle
+    const jwk = await Crypto.exportKey("jwk", this.cryptoKey)
+
+    // remove private data from JWK
+    delete jwk.d
+    delete jwk.dp
+    delete jwk.dq
+    delete jwk.q
+    delete jwk.qi
+    jwk.key_ops = ["encrypt", "wrapKey"]
+    const opts = { name: "RSA-OAEP", hash: "SHA-256" }
+    const keyUsages = ["encrypt", "wrapKey"]
+
+    // import public key
+    const publicKey = await Crypto.importKey("jwk", jwk, opts, true, keyUsages)
+
+    this._setPublicKey(publicKey)
+  }
+
+  get publicKey() { return new PublicKey(this._publicKey); }
+
+  async static generate(strength = 2048) {
+    const Crypto = window.crypto.subtle
+    const opts = {
+      name: 'RSA-OAEP',
+      modulusLength: strength,
+      // FIXME: should use [1, 0, 0, 0, 1] exponent as best protected
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: {
+        name: 'SHA-256',
+      }
+    }
+
+    const pair = await Crypto.generateKey(opts, true, ['encrypt', 'decrypt'])
+    const priv = new PrivateKey(pair.privateKey)
+
+    // FIXME: to avoid double calculation we use public key from pair
+    priv._setPublicKey(pair.publicKey)
+
+    return priv
+  }
+
+  /**
+   * Decrypts data with OAEP
+   * @param {Uint8Array} encrypted - encrypted data
+   * @return {Promise} - Promise<Uint8Array> with decrypted data
+   */
+  async decrypt(encrypted) {
+    const algorithm = { name: 'RSA-OAEP' }
+    const data = new Uint8Array(decode64(base64data)).buffer
+    const result = await crypto.subtle.decrypt(algorithm, privateKey, data)
+
+    return new Uint8Array(result)
+  }
+}
+
+class SymmetricKey {
+  constructor(options) {
+    const algorithm = { name: 'AES-GCM' }
+
+    if (options.keyBytes) this.cryptoKey = crypto.subtle.importKey(
+      'raw',
+      bytes,
+      algorithm,
+      true,
+      ['encrypt', 'decrypt']
+    )
+    else this.cryptoKey = options.cryptoKey
+  }
+
+  async static generate() {
+    const algorithm = { name: 'AES-GCM', length: 256 }
+    const cryptoKey = await crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
+
+    return new SymmetricKey({ cryptoKey })
+  }
+
+  /**
+   * Transforms data with AES cipher (GCM-mode)
+   * @param {Uint8Array} data - data to transform
+   * @param {Uint8Array} iv - initial vector
+   * @return {Promise} - Promise<Uint8Array> with transformed data
+   */
+  async transform(data, iv) {
+    const alg = { name: 'AES-GCM', iv }
+    const transformed = await crypto.subtle.encrypt(alg, this.cryptoKey, data)
+
+    return new Uint8Array(transformed)
+  }
+}
+
+//------------------ MOVE TO CRYPTO WRAPPER: END   ---------------------
+
 const RECOVERY_KEY_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTVWXYZ'
 const RECOVERY_KEY_GROUPS_COUNT = 6
 const generateRecoverySixSymbols = customAlphabet(RECOVERY_KEY_ALPHABET, 6)
 const generateRecoveryFiveSymbols = customAlphabet(RECOVERY_KEY_ALPHABET, 5)
 
-const textEncode = string => new TextEncoder().encode(string)
-const bytesToBase64 = bytes => base64Codec.fromBits(bytesCodec.toBits(bytes))
-const base64ToBytes = base64 => bytesCodec.fromBits(base64Codec.toBits(base64))
-const utfToBits = utf8String => utf8StringCodec.toBits(utf8String)
-const bytesToUtf = bytes => utf8StringCodec.fromBits(bytesCodec.toBits(bytes))
-const bitsToHex = bits => hexCodec.fromBits(bits)
-const bitsToBytes = bits => bytesCodec.fromBits(bits)
-const hkdf = (string, string2, version = 'PBES2g-HS256') =>
-  HKDF(string, 256, string2, version, SHA256)
-
-function xor(a, b) {
-  return a.map((item, i) => item ^ b[i])
-}
-
-export const CredentialOwners = Object.freeze({
-  PERSONAL: 'User',
-  TEAM: 'Team',
-})
-
 export function init({ crypto = window.crypto, storage = window.localStorage } = {}) {
-  const pbkdf2 = async (password, saltStr) => {
-    const importAlg = { name: 'PBKDF2' }
-    const passwordRaw = new Uint8Array(bitsToBytes(utfToBits(password)))
-    const key = await crypto.subtle.importKey('raw', passwordRaw, importAlg, false, ['deriveKey'])
+  const generateRandomBytes = length =>
+    crypto.getRandomValues(new Uint8Array(length))
 
-    const salt = new Uint8Array(bitsToBytes(utfToBits(saltStr)))
-    const deriveAlg = { name: 'PBKDF2', iterations: 100000, hash: { name: 'SHA-256' }, salt }
-    const aesOptions = { name: 'AES-GCM', length: 256 }
-    const derivedKey = await crypto.subtle.deriveKey(deriveAlg, key, aesOptions, true, ['encrypt'])
+  // FIXME: there is no sense to transform salt from bytes to text and back. See usage
+  const generateRandomSalt = () => encode64(generateRandomBytes(12))
 
-    const result = await crypto.subtle.exportKey('raw', derivedKey)
-    return new Uint8Array(result)
-  }
-
-  const generateUserKey = () => {
-    const algorithm = {
-      name: 'RSA-OAEP',
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: {
-        name: 'SHA-256',
-      },
-    }
-
-    return crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
-  }
-
-  const generateUserKeys = async () => {
-    const key = await generateUserKey()
-    const [privateKey, publicKey] = await Promise.all([
-      createKey({ key: key.privateKey, kid: nanoid() }),
-      createKey({ key: key.publicKey, kid: nanoid() }),
-    ])
-    return { privateKey, publicKey }
-  }
-
-  const exportKey = async (key, kid) => {
-    const jwk = await crypto.subtle.exportKey('jwk', key)
-    return Object.assign(jwk, { kid })
-  }
-
-  const importKey = keyBytes => {
-    const algorithm = { name: 'AES-GCM' }
-    return crypto.subtle.importKey('raw', keyBytes, algorithm, true, ['encrypt', 'decrypt'])
-  }
-
-  const getAlgorightByName = name => {
-    switch (name) {
-      case 'RSA-OAEP-256': {
-        return { name: 'RSA-OAEP', hash: { name: 'SHA-256' } }
-      }
-      default: {
-        return { name: 'AES-GCM' }
-      }
-    }
-  }
-
-  const importJwk = jwk =>
-    crypto.subtle.importKey('jwk', jwk, getAlgorightByName(jwk.alg), true, jwk.key_ops)
-
-  const generateRandomBytes = length => crypto.getRandomValues(new Uint8Array(length))
-
-  const generateKey = () => {
-    const algorithm = { name: 'AES-GCM', length: 256 }
-    return crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
-  }
-
-  const encryptAES = (iv, key, data) => {
-    const algorithm = { name: 'AES-GCM', iv }
-    return crypto.subtle.encrypt(algorithm, key, data)
-  }
-
-  const encryptRSA = (publicKey, data) => {
-    const algorithm = { name: 'RSA-OAEP' }
-    return crypto.subtle.encrypt(algorithm, publicKey, data)
-  }
-
-  const decryptAES = async (base64iv, key, base64data) => {
-    const iv = new Uint8Array(base64ToBytes(base64iv))
-    const algorithm = { name: 'AES-GCM', iv }
-    const data = new Uint8Array(base64ToBytes(base64data)).buffer
-    const result = await crypto.subtle.decrypt(algorithm, key, data)
-
-    return bytesToUtf(new Uint8Array(result))
-  }
-
-  const decryptRSA = async (privateKey, base64data) => {
-    const algorithm = { name: 'RSA-OAEP' }
-    const data = new Uint8Array(base64ToBytes(base64data)).buffer
-    const result = await crypto.subtle.decrypt(algorithm, privateKey, data)
-
-    return bytesToUtf(new Uint8Array(result))
-  }
-
-  const generateRandomSalt = () => bytesToBase64(generateRandomBytes(12))
-
-  const encryptPrivateKey = async (mainKey, privateKey) => {
+  const encryptPrivateKey = async (mainKeyDeprecated, privateKeyDeprecated) => {
     const iv = generateRandomBytes(12)
-    const encodedPrivateKey = textEncode(JSON.stringify(privateKey.jwk))
+    const sk = new SymmetricKey({ cryptoKey: mainKeyDeprecated.crypto })
 
-    const result = await encryptAES(iv, mainKey.crypto, encodedPrivateKey)
-    const data = bytesToBase64(new Uint8Array(result))
+    const privateKeyPacked = jsonToBytes(privateKeyDeprecated.jwk)
+    const privateKeyTransformed = sk.transform(privateKeyPacked, iv)
 
     return {
       kid: 'main',
       enc: 'A256GCM',
       cty: 'b5+jwk+json',
-      iv: bytesToBase64(iv),
-      data,
+      iv: encode64(iv),
+      data: encode64(privateKeyTransformed),
     }
   }
 
@@ -167,48 +315,20 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   })()
 
-  async function generateMainKey({ masterPassword = '0000', recoveryKey, salt, userId }) {
-    const pbkdf2Bytes = await pbkdf2(masterPassword, bitsToHex(hkdf(utfToBits(salt), userId)))
-    const hkdfBytes = bitsToBytes(hkdf(utfToBits(recoveryKey.value), recoveryKey.id))
-    const mainKeyBytes = new Uint8Array(xor(pbkdf2Bytes, hkdfBytes))
+  async function recoverMainKey({
+    masterPassword = '0000',
+    recoveryKey,
+    salt,
+    userId
+  }) {
+    // FIXME: salt should be just random bytes
+    const complexSalt = textToBytes(bitsToHex(hkdf(textToBits(salt), userId)))
+    const derivedKey = await pbkdf2(masterPassword, complexSalt)
+    const hkdfBits = hkdf(textToBits(recoveryKey.value), recoveryKey.id)
+    const hkdfBytes = bitsToBytes(hkdfBits)
+    const mainKeyBytes = new Uint8Array(xor(derivedKey, hkdfBytes))
 
-    return importKey(mainKeyBytes)
-  }
-
-  async function createKey({ key, kid, jwk }) {
-    if (key) {
-      return { crypto: key, id: kid, jwk: await exportKey(key, kid) }
-    }
-
-    return { jwk, id: jwk.kid, crypto: await importJwk(jwk) }
-  }
-
-  async function encryptCredentialKey({ publicKey }) {
-    const key = await createKey({ key: await generateKey(), kid: nanoid() })
-    const encodedKey = textEncode(JSON.stringify(key.jwk))
-
-    const result = await encryptRSA(publicKey.crypto, encodedKey)
-    const data = bytesToBase64(new Uint8Array(result))
-
-    return {
-      encrypted: {
-        kid: publicKey.id,
-        enc: 'RSA-OAEP',
-        cty: 'b5+jwk+json',
-        data,
-      },
-      id: key.id,
-      crypto: key.crypto,
-    }
-  }
-
-  async function decryptCredentialKey({ encryptedData, privateKey }) {
-    const jwk = await decryptRSA(privateKey.crypto, encryptedData.data)
-    const key = await createKey({ jwk: JSON.parse(jwk) })
-
-    return {
-      crypto: key.crypto,
-    }
+    return new SymmetricKey({ keyBytes: mainKeyBytes })
   }
 
   async function prepareUserCredentials({ keySet, data }) {
@@ -221,60 +341,106 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   }
 
-  async function encryptCredential({ publicKey, data }) {
-    const key = await encryptCredentialKey({ publicKey: await createKey({ jwk: publicKey }) })
+  async function encryptCredential(options) {
+    const data = options.data
+    const publicKeyExt = await ExtendedKey.unpack(options.publicKey)
+    const publicKey = new PublicKey(publicKeyExt.crypto)
+    const symmetricKey = await SymmetricKey.generate()
+    const symmetricKeyExt = new ExtendedKey({ cryptoKey: symmetricKey.cryptoKey })
+
+    const packed = await symmetricKeyExt.packBytes()
+    const encrypted = publicKey.encrypt(packed)
+
     const iv = generateRandomBytes(12)
-    const result = await encryptAES(iv, key.crypto, textEncode(JSON.stringify(data)))
+    const transformed = symmetricKey.transform(jsonToBytes(data), iv)
 
     return {
-      key,
+      key: {
+        encrypted: {
+          kid: publicKeyExt.id,
+          enc: 'RSA-OAEP',
+          cty: 'b5+jwk+json',
+          data: encode64(encrypted),
+        },
+        id: symmetricKeyExt.id,
+        crypto: symmetricKeyExt.crypto,
+      },
       encrypted: {
-        kid: key.id,
+        kid: symmetricKeyExt.id,
         enc: 'A256GCM',
         cty: 'b5+jwk+json',
-        iv: bytesToBase64(iv),
-        data: bytesToBase64(new Uint8Array(result)),
+        iv: encode64(iv),
+        data: encode64(transformed),
       },
     }
   }
 
-  async function decryptCredential({ encryptedData, encryptedKeyData, privateKey }) {
-    const key = await decryptCredentialKey({ encryptedData: encryptedKeyData, privateKey })
-    const data = await decryptAES(encryptedData.iv, key.crypto, encryptedData.data)
-    return JSON.parse(data)
+  async function decryptCredential({
+    encryptedData,
+    encryptedKeyData,
+    privateKey
+  }) {
+    const encryptedData = options.encryptedData
+    const encryptedKeyData = options.encryptedKeyData
+    const privateKeyPacked = options.privateKey
+
+    const privateKey = new PrivateKey(privateKeyPacked.crypto)
+
+    const encryptedSymmetricKeyJWK = new Uint8Array(decode64(encryptedKeyData.data))
+    const symmetricKeyJWKBytes = privateKey.decrypt(encryptedSymmetricKeyJWK)
+    const symmetricKeyJWK = bytesToJSON(symmetricKeyJWKBytes)
+    const symmetricKeyExt = await ExtendedKey.unpack(symmetricKeyJWK)
+
+    const symmetricKey = new SymmetricKey({ key: symmetricKeyExt.crypto })
+
+    const data = await symmetricKey.transform(encryptedData.data, encryptedData.iv)
+
+    return bytesToJSON(data)
   }
 
-  async function decryptKeySet({ userId, recoveryKey, publicKeyRaw, encryptedPrivateKey, salt }) {
-    const mainKey = await createKey({
-      kid: 'main',
-      key: await generateMainKey({ userId, recoveryKey, salt }),
-    })
+  async function decryptKeySet({
+    userId,
+    recoveryKey,
+    publicKeyRaw,
+    encryptedPrivateKey,
+    salt
+  }) {
+    const symmetricKey = await recoverMainKey({ userId, recoveryKey, salt })
+    const symmetricKeyExt = new ExtendedKey({ kid: 'main', cryptoKey: symmetricKey.cryptoKey })
+    await symmetricKeyExt.pack()
 
-    const privateJwkStr = await decryptAES(
-      encryptedPrivateKey.iv,
-      mainKey.crypto,
+    const privateJWKBytes = await symmetricKey.transform(
       encryptedPrivateKey.data,
+      encryptedPrivateKey.iv
     )
-    const [privateKey, publicKey] = await Promise.all([
-      createKey({ jwk: JSON.parse(privateJwkStr) }),
-      createKey({ jwk: publicKeyRaw }),
-    ])
+
+    const privateJWK = JSON.parse(bytesToUtf(privateJWKBytes))
+    const privateKeyExt = await ExtendedKey.unpack(privateJWKBytes)
+    // FIXME: is public key related to provided private? should calculate public from private
+    const publicKeyExt = await ExtendedKey.unpack(publicKeyRaw)
 
     return {
-      mainKey,
-      privateKey,
-      publicKey,
+      mainKey: symmetricKeyExt,
+      privateKey: privateKeyExt,
+      publicKey: publicKey,
     }
   }
 
   async function createKeySet({ userId, recoveryKey }) {
     const salt = generateRandomSalt()
-    const [mainKey, { publicKey, privateKey }] = await Promise.all([
-      Promise.resolve()
-        .then(() => generateMainKey({ userId, recoveryKey, salt }))
-        .then(key => createKey({ kid: 'main', key })),
-      generateUserKeys(),
-    ])
+    const sk = await recoverMainKey({ userId, recoveryKey, salt })
+    const priv = await PrivateKey.generate()
+    const pub = priv.publicKey
+
+    const mainKey = new ExtendedKey({ kid: 'main', cryptoKey: sk.cryptoKey })
+    const privateKey = new ExtendedKey({ cryptoKey: priv.cryptoKey })
+    const publicKey = new ExtendedKey({ cryptoKey: pub.cryptoKey })
+
+    // FIXME: we called pack to make sure 'jwk' property is calculated for sync access.
+    // Should use pack() when jwk is needed
+    await mainKey.pack()
+    await privateKey.pack()
+    await publicKey.pack()
 
     return {
       salt,
