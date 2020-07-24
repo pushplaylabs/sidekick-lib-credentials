@@ -422,7 +422,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     return {
       mainKey: symmetricKeyExt,
       privateKey: privateKeyExt,
-      publicKey: publicKey,
+      publicKey: publicKeyExt,
     }
   }
 
