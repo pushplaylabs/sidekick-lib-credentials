@@ -53,7 +53,7 @@ const bitsToBytes = bits => bytesCodec.fromBits(bits)
  * @param {string} text
  * @return {Uint8Array}
  */
-const textToBytes = (text) => new Uint8Array(bitsToBytes(textToBits(password)))
+const textToBytes = (text) => new Uint8Array(bitsToBytes(textToBits(text)))
 
 /**
  * @param {String|bitArray} ikm - The input keying material.
@@ -106,12 +106,12 @@ const pbkdf2 = async (password, salt) => {
 // FIXME: add key type to properties
 class ExtendedKey {
   constructor(options = {}) {
-    this.kid = options.kid || nanoid()
+    this.id = options.kid || nanoid()
     this.jwk = options.jwk
     this.crypto = options.cryptoKey
   }
 
-  async static unpack(jwk) {
+  static async unpack(jwk) {
     const Crypto = window.crypto.subtle
     let algorithm = AES_ALGORITHM
 
@@ -127,7 +127,7 @@ class ExtendedKey {
 
     const Crypto = window.crypto.subtle
     const jwk = await Crypto.exportKey('jwk', this.crypto)
-    jwk.kid = this.kid
+    jwk.kid = this.id
 
     this.jwk = jwk
 
@@ -169,7 +169,7 @@ class PrivateKey {
   _setPublicKey(cryptoKey) { this._publicKey = cryptoKey }
 
   // FIXME: crypto.subtle disallows get public key from private sync
-  _calcPublicKey() {
+  async _calcPublicKey() {
     const Crypto = window.crypto.subtle
     const jwk = await Crypto.exportKey("jwk", this.cryptoKey)
 
@@ -191,7 +191,7 @@ class PrivateKey {
 
   get publicKey() { return new PublicKey(this._publicKey); }
 
-  async static generate(strength = 2048) {
+  static async generate(strength = 2048) {
     const Crypto = window.crypto.subtle
     const opts = {
       name: 'RSA-OAEP',
@@ -219,32 +219,37 @@ class PrivateKey {
    */
   async decrypt(encrypted) {
     const algorithm = { name: 'RSA-OAEP' }
-    const data = new Uint8Array(decode64(base64data)).buffer
-    const result = await crypto.subtle.decrypt(algorithm, privateKey, data)
+    const data = encrypted.buffer
+    const result = await crypto.subtle.decrypt(algorithm, this.cryptoKey, data)
 
     return new Uint8Array(result)
   }
 }
 
 class SymmetricKey {
-  constructor(options) {
+  constructor(cryptoKey) {
+    this.cryptoKey = cryptoKey
+  }
+
+  static async generate() {
+    const algorithm = { name: 'AES-GCM', length: 256 }
+    const cryptoKey = await crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
+
+    return new SymmetricKey(cryptoKey)
+  }
+
+  static async fromBytes(bytes) {
     const algorithm = { name: 'AES-GCM' }
 
-    if (options.keyBytes) this.cryptoKey = crypto.subtle.importKey(
+    const cryptoKey = await crypto.subtle.importKey(
       'raw',
       bytes,
       algorithm,
       true,
       ['encrypt', 'decrypt']
     )
-    else this.cryptoKey = options.cryptoKey
-  }
 
-  async static generate() {
-    const algorithm = { name: 'AES-GCM', length: 256 }
-    const cryptoKey = await crypto.subtle.generateKey(algorithm, true, ['encrypt', 'decrypt'])
-
-    return new SymmetricKey({ cryptoKey })
+    return new SymmetricKey(cryptoKey)
   }
 
   /**
@@ -253,9 +258,22 @@ class SymmetricKey {
    * @param {Uint8Array} iv - initial vector
    * @return {Promise} - Promise<Uint8Array> with transformed data
    */
-  async transform(data, iv) {
-    const alg = { name: 'AES-GCM', iv }
+  async encrypt(data, iv) {
+    const alg = { name: 'AES-GCM', iv: iv }
     const transformed = await crypto.subtle.encrypt(alg, this.cryptoKey, data)
+
+    return new Uint8Array(transformed)
+  }
+
+  /**
+   * Transforms data with AES cipher (GCM-mode)
+   * @param {Uint8Array} data - data to transform
+   * @param {Uint8Array} iv - initial vector
+   * @return {Promise} - Promise<Uint8Array> with transformed data
+   */
+  async decrypt(data, iv) {
+    const alg = { name: 'AES-GCM', iv: iv }
+    const transformed = await crypto.subtle.decrypt(alg, this.cryptoKey, data)
 
     return new Uint8Array(transformed)
   }
@@ -277,10 +295,10 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
 
   const encryptPrivateKey = async (mainKeyDeprecated, privateKeyDeprecated) => {
     const iv = generateRandomBytes(12)
-    const sk = new SymmetricKey({ cryptoKey: mainKeyDeprecated.crypto })
+    const sk = new SymmetricKey(mainKeyDeprecated.crypto)
 
     const privateKeyPacked = jsonToBytes(privateKeyDeprecated.jwk)
-    const privateKeyTransformed = sk.transform(privateKeyPacked, iv)
+    const privateKeyTransformed = await sk.encrypt(privateKeyPacked, iv)
 
     return {
       kid: 'main',
@@ -328,7 +346,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     const hkdfBytes = bitsToBytes(hkdfBits)
     const mainKeyBytes = new Uint8Array(xor(derivedKey, hkdfBytes))
 
-    return new SymmetricKey({ keyBytes: mainKeyBytes })
+    return await SymmetricKey.fromBytes(mainKeyBytes)
   }
 
   async function prepareUserCredentials({ keySet, data }) {
@@ -349,10 +367,10 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     const symmetricKeyExt = new ExtendedKey({ cryptoKey: symmetricKey.cryptoKey })
 
     const packed = await symmetricKeyExt.packBytes()
-    const encrypted = publicKey.encrypt(packed)
+    const encrypted = await publicKey.encrypt(packed)
 
     const iv = generateRandomBytes(12)
-    const transformed = symmetricKey.transform(jsonToBytes(data), iv)
+    const transformed = await symmetricKey.encrypt(jsonToBytes(data), iv)
 
     return {
       key: {
@@ -375,11 +393,7 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
   }
 
-  async function decryptCredential({
-    encryptedData,
-    encryptedKeyData,
-    privateKey
-  }) {
+  async function decryptCredential(options) {
     const encryptedData = options.encryptedData
     const encryptedKeyData = options.encryptedKeyData
     const privateKeyPacked = options.privateKey
@@ -387,13 +401,15 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     const privateKey = new PrivateKey(privateKeyPacked.crypto)
 
     const encryptedSymmetricKeyJWK = new Uint8Array(decode64(encryptedKeyData.data))
-    const symmetricKeyJWKBytes = privateKey.decrypt(encryptedSymmetricKeyJWK)
+    const symmetricKeyJWKBytes = await privateKey.decrypt(encryptedSymmetricKeyJWK)
     const symmetricKeyJWK = bytesToJSON(symmetricKeyJWKBytes)
     const symmetricKeyExt = await ExtendedKey.unpack(symmetricKeyJWK)
+    const symmetricKey = new SymmetricKey(symmetricKeyExt.crypto)
 
-    const symmetricKey = new SymmetricKey({ key: symmetricKeyExt.crypto })
-
-    const data = await symmetricKey.transform(encryptedData.data, encryptedData.iv)
+    const data = await symmetricKey.decrypt(
+      Uint8Array.from(decode64(encryptedData.data)),
+      Uint8Array.from(decode64(encryptedData.iv))
+    )
 
     return bytesToJSON(data)
   }
@@ -408,14 +424,12 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     const symmetricKey = await recoverMainKey({ userId, recoveryKey, salt })
     const symmetricKeyExt = new ExtendedKey({ kid: 'main', cryptoKey: symmetricKey.cryptoKey })
     await symmetricKeyExt.pack()
-
-    const privateJWKBytes = await symmetricKey.transform(
-      encryptedPrivateKey.data,
-      encryptedPrivateKey.iv
+    const privateJWKBytes = await symmetricKey.decrypt(
+      Uint8Array.from(decode64(encryptedPrivateKey.data)),
+      Uint8Array.from(decode64(encryptedPrivateKey.iv))
     )
-
     const privateJWK = JSON.parse(bytesToUtf(privateJWKBytes))
-    const privateKeyExt = await ExtendedKey.unpack(privateJWKBytes)
+    const privateKeyExt = await ExtendedKey.unpack(privateJWK)
     // FIXME: is public key related to provided private? should calculate public from private
     const publicKeyExt = await ExtendedKey.unpack(publicKeyRaw)
 

@@ -25,7 +25,6 @@ describe("Crypto", () => {
         recoveryKey: RECOVERY_KEY1
       });
 
-      console.log(keySet);
       const { mainKey, privateKey, publicKey } = keySet;
 
       expect(keySet.salt).to.be.a("string");
