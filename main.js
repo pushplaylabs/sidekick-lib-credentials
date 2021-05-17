@@ -151,8 +151,8 @@ export function init({ crypto = window.crypto, storage = window.localStorage } =
     }
 
     return {
-      get: userId => {
-        const raw = storage.getItem(getKey(userId))
+      get: async userId => {
+        const raw = await storage.getItem(getKey(userId))
         return raw ? extractData(raw) : null
       },
       generate: () => {
